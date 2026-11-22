@@ -64,6 +64,7 @@ jobs:
           make defconfig
           echo "--- selected target ---"
           grep -E '^CONFIG_TARGET_(armsr|ROOTFS_TARGZ)' .config
+          grep -q '^CONFIG_TARGET_ROOTFS_TARGZ=y' .config || { echo "ERROR: TARGET_ROOTFS_TARGZ not enabled"; grep TARGET_ROOTFS_TARGZ .config || true; exit 1; }
 
       - name: Build rootfs
         run: |
@@ -73,12 +74,22 @@ jobs:
       - name: Prepare docker context
         id: rootfs
         run: |
+          echo "=== built files in target dir ==="
+          ls -lh bin/targets/armsr/armv8/ || true
           TAR=$(find bin/targets/armsr/armv8 -name '*rootfs.tar.gz' | head -n1)
           test -n "$TAR" || { echo "rootfs.tar.gz not found"; exit 1; }
+          echo "=== using rootfs: $TAR ==="
           mkdir -p docker-build
           cp "$TAR" docker-build/rootfs.tar.gz
-          cp Dockerfile docker-build/Dockerfile
-          ls -lh docker-build/rootfs.tar.gz
+          cat > docker-build/Dockerfile <<'EOF'
+          FROM scratch
+          LABEL org.opencontainers.image.title="FanchmWrt arm64 rootfs"
+          ADD rootfs.tar.gz /
+          ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          CMD ["/bin/sh"]
+          EOF
+          echo "=== docker context ==="
+          ls -lh docker-build/
           echo "path=$TAR" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
