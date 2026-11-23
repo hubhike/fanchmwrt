@@ -60,21 +60,63 @@ jobs:
           CONFIG_TARGET_armsr_armv8_device_generic=y
           CONFIG_TARGET_ROOTFS_TARGZ=y
           CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_PACKAGE_luci-app-fwx-app-center=y
+          CONFIG_PACKAGE_luci-app-filemanager=y
           EOF
           make defconfig
           echo "--- selected target ---"
           grep -E '^CONFIG_TARGET_(armsr|ROOTFS_TARGZ)' .config
           grep -q '^CONFIG_TARGET_ROOTFS_TARGZ=y' .config || { echo "ERROR: TARGET_ROOTFS_TARGZ not enabled"; grep TARGET_ROOTFS_TARGZ .config || true; exit 1; }
+          echo "--- requested packages ---"
+          grep -E '^CONFIG_PACKAGE_(luci-app-fwx-app-center|luci-app-filemanager)=' .config || true
+          grep -q '^CONFIG_PACKAGE_luci-app-fwx-app-center=y' .config || { echo "ERROR: app-center not selected"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_luci-app-filemanager=y' .config || { echo "ERROR: filemanager not selected"; exit 1; }
 
       - name: Build rootfs
         run: |
           export CCACHE_DIR="$PWD/.ccache"
           make -j$(nproc)
 
+      - name: Diagnose OAF feature-online
+        id: diag
+        run: |
+          echo "========== OAF DIAGNOSTICS START =========="
+          TAR=$(find bin/targets/armsr/armv8 -name '*rootfs.tar.gz' | head -n1)
+          echo "--- [1] config symbols ---"
+          grep -E '^CONFIG_PACKAGE_(fwxd|kmod-fwx|luci-app-fwx-feature|luci-app-fwx-app-center|luci-app-filemanager|ca-certificates|tar)=' .config || true
+          echo "--- [2] unpacking $TAR ---"
+          rm -rf /tmp/oaf-rootfs && mkdir -p /tmp/oaf-rootfs
+          tar -xzf "$TAR" -C /tmp/oaf-rootfs
+          echo "--- [3] /etc/config/fwx ---"
+          cat /tmp/oaf-rootfs/etc/config/fwx 2>/dev/null || echo "MISSING /etc/config/fwx"
+          echo "--- [4] CA bundle ---"
+          ls -l /tmp/oaf-rootfs/etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo "MISSING ca-certificates.crt"
+          echo "--- [5] tar binary ---"
+          ls -l /tmp/oaf-rootfs/usr/bin/tar /tmp/oaf-rootfs/bin/tar /tmp/oaf-rootfs/sbin/tar 2>/dev/null || echo "no standalone tar"
+          echo "--- [6] fwxd / feature.bin / acl ---"
+          ls -l /tmp/oaf-rootfs/usr/sbin/fwxd /tmp/oaf-rootfs/etc/fwxd/feature.bin /tmp/oaf-rootfs/usr/share/rpcd/acl.d/luci-app-fwx.json 2>/dev/null || true
+          echo "--- [7] requested packages ---"
+          for f in luci-app-fwx-app-center luci-app-filemanager; do
+            LIST="/tmp/oaf-rootfs/usr/lib/opkg/info/$f.list"
+            if [ -f "$LIST" ]; then echo "FOUND $f ($(wc -l < "$LIST") files)"; head -8 "$LIST"; else echo "MISSING $f"; fi
+          done
+          echo "--- [8] conclusions ---"
+          TOKEN_VAL=$(sed -n "s/.*option feature_token '\([^']*\)'.*/\1/p" /tmp/oaf-rootfs/etc/config/fwx 2>/dev/null | head -n1)
+          if [ -z "$TOKEN_VAL" ]; then TOKEN_EMPTY=yes; else TOKEN_EMPTY=no; fi
+          if [ -f /tmp/oaf-rootfs/etc/ssl/certs/ca-certificates.crt ]; then CA_PRESENT=yes; else CA_PRESENT=no; fi
+          if [ -f /tmp/oaf-rootfs/usr/bin/tar ] || [ -f /tmp/oaf-rootfs/bin/tar ]; then TAR_PRESENT=yes; else TAR_PRESENT=no; fi
+          if [ -f /tmp/oaf-rootfs/usr/sbin/fwxd ]; then FWXD_PRESENT=yes; else FWXD_PRESENT=no; fi
+          echo "oaf_token_empty=$TOKEN_EMPTY oaf_ca_present=$CA_PRESENT oaf_tar_present=$TAR_PRESENT oaf_fwxd_present=$FWXD_PRESENT"
+          echo "oaf_token_empty=$TOKEN_EMPTY" >> "$GITHUB_OUTPUT"
+          echo "oaf_ca_present=$CA_PRESENT" >> "$GITHUB_OUTPUT"
+          echo "oaf_tar_present=$TAR_PRESENT" >> "$GITHUB_OUTPUT"
+          echo "oaf_fwxd_present=$FWXD_PRESENT" >> "$GITHUB_OUTPUT"
+          echo "========== OAF DIAGNOSTICS END =========="
+
       - name: Prepare docker context
         id: rootfs
         run: |
-          echo "=== built files in target dir ==="
+          echo "=== built files ==="
           ls -lh bin/targets/armsr/armv8/ || true
           TAR=$(find bin/targets/armsr/armv8 -name '*rootfs.tar.gz' | head -n1)
           test -n "$TAR" || { echo "rootfs.tar.gz not found"; exit 1; }
@@ -109,6 +151,11 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            oaf.token-empty=${{ steps.diag.outputs.oaf_token_empty }}
+            oaf.ca-present=${{ steps.diag.outputs.oaf_ca_present }}
+            oaf.tar-present=${{ steps.diag.outputs.oaf_tar_present }}
+            oaf.fwxd-present=${{ steps.diag.outputs.oaf_fwxd_present }}
 
       - name: Upload rootfs artifact
         uses: actions/upload-artifact@v4
