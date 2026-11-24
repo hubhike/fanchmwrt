@@ -83,13 +83,23 @@ jobs:
           cp "$SRC/fwx.ko" /tmp/fwx-6.12.118-fwx.ko
           cp /tmp/fwx.ko.sha256 /tmp/fwx-6.12.118-fwx.ko.sha256
 
+      - name: Upload module as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fwx-6.12.118-fwx
+          path: |
+            /tmp/fwx-6.12.118-fwx.ko
+            /tmp/fwx-6.12.118-fwx.ko.sha256
+          if-no-files-found: error
+
       - name: Upload to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          gh release upload kernel-fwx-6.12 \
-            /tmp/fwx-6.12.118-fwx.ko \
-            /tmp/fwx-6.12.118-fwx.ko.sha256 \
-            --repo hubhike/amlogic-s9xxx-armbian --clobber
-          echo "Uploaded fwx.ko to kernel-fwx-6.12 release"
+          gh release create fwx-ko-6.12 --title "fwx.ko for 6.12.118-fwx" \
+            --notes "FanchmWrt DPI kernel module built against patched 6.12.118-fwx headers" \
+            /tmp/fwx-6.12.118-fwx.ko /tmp/fwx-6.12.118-fwx.ko.sha256 2>/dev/null \
+            || gh release upload fwx-ko-6.12 \
+            /tmp/fwx-6.12.118-fwx.ko /tmp/fwx-6.12.118-fwx.ko.sha256 --clobber
+          echo "Uploaded fwx.ko to fwx-ko-6.12 release"
