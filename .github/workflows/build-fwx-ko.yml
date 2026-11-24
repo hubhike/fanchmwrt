@@ -1,0 +1,97 @@
+name: Build fwx.ko for kernel 6.12.118-fwx
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fanchmwrt-25.12.6]
+    paths:
+      - '.github/workflows/build-fwx-ko.yml'
+      - 'package/fcm/fwx/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - name: Checkout fanchmwrt source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get -y update
+          sudo apt-get -y install build-essential flex bison libssl-dev bc \
+            libelf-dev xz-utils ccache rsync kmod file
+          sudo apt-get clean
+
+      - name: Download Arm GNU Toolchain 15.3 (same as kernel build)
+        run: |
+          set -e
+          TCURL="https://github.com/ophub/kernel/releases/download/toolchain/arm-gnu-toolchain-15.3.rel2-aarch64-aarch64-none-linux-gnu.tar.xz"
+          curl -fsSL --retry 5 --retry-delay 10 "$TCURL" -o /tmp/toolchain.tar.xz
+          sudo mkdir -p /usr/local/toolchain
+          sudo tar -xJf /tmp/toolchain.tar.xz -C /usr/local/toolchain
+          TC_DIR=$(find /usr/local/toolchain -maxdepth 1 -type d -name '*15.3*' | head -1)
+          echo "TOOLCHAIN_DIR=$TC_DIR" >> "$GITHUB_ENV"
+          echo "$TC_DIR/bin" >> "$GITHUB_PATH"
+          "$TC_DIR/bin/aarch64-none-linux-gnu-gcc" --version | head -1
+
+      - name: Download kernel 6.12.118-fwx headers + config
+        run: |
+          set -e
+          REL="https://github.com/hubhike/amlogic-s9xxx-armbian/releases/download/kernel-fwx-6.12"
+          curl -fsSL --retry 5 --retry-delay 10 "$REL/6.12.118.tar.gz" -o /tmp/kernel.tar.gz
+          mkdir -p /tmp/kernel
+          tar -xzf /tmp/kernel.tar.gz -C /tmp/kernel
+          mkdir -p /tmp/kdir
+          tar -xzf /tmp/kernel/6.12.118/header-6.12.118-fwx.tar.gz -C /tmp/kdir
+          tar -xzf /tmp/kernel/6.12.118/boot-6.12.118-fwx.tar.gz -C /tmp/kernel
+          cp /tmp/kernel/config-6.12.118-fwx /tmp/kdir/.config
+          echo "KDIR=/tmp/kdir" >> "$GITHUB_ENV"
+          echo "Vermagic check:"
+          cat /tmp/kdir/include/generated/utsrelease.h
+          grep -q 'fwx_data' /tmp/kdir/include/net/netfilter/nf_conntrack.h \
+            || { echo "ERROR: kernel headers missing fwx_data patch"; exit 1; }
+          echo "fwx_data patch present in headers OK"
+
+      - name: Build fwx.ko
+        run: |
+          set -e
+          SRC="$GITHUB_WORKSPACE/package/fcm/fwx/src"
+          KCFLAGS="-Wno-error=missing-prototypes -Wno-error=missing-declarations \
+            -Wno-error=unused-variable -Wno-error=declaration-after-statement \
+            -Wno-error=implicit-fallthrough -Wno-error=missing-braces \
+            -Wno-error=parentheses -Wno-error=format -Wno-frame-larger-than"
+          make -C "$KDIR" M="$SRC" ARCH=arm64 \
+            CROSS_COMPILE="$TOOLCHAIN_DIR/bin/aarch64-none-linux-gnu-" \
+            CC="ccache $TOOLCHAIN_DIR/bin/aarch64-none-linux-gnu-gcc" \
+            KCFLAGS="$KCFLAGS" \
+            modules -j$(nproc)
+          ls -lh "$SRC/fwx.ko"
+
+      - name: Verify module
+        run: |
+          set -e
+          SRC="$GITHUB_WORKSPACE/package/fcm/fwx/src"
+          file "$SRC/fwx.ko"
+          echo "vermagic must be 6.12.118-fwx:"
+          strings "$SRC/fwx.ko" | grep -m1 '6.12.118' || true
+          "$TOOLCHAIN_DIR/bin/aarch64-none-linux-gnu-nm" -u "$SRC/fwx.ko" > /tmp/undef.txt || true
+          echo "=== undefined symbols (must all be kernel exports) ==="
+          head -60 /tmp/undef.txt
+          echo "=== sha256 ==="
+          sha256sum "$SRC/fwx.ko" | tee /tmp/fwx.ko.sha256
+          cp "$SRC/fwx.ko" /tmp/fwx-6.12.118-fwx.ko
+          cp /tmp/fwx.ko.sha256 /tmp/fwx-6.12.118-fwx.ko.sha256
+
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh release upload kernel-fwx-6.12 \
+            /tmp/fwx-6.12.118-fwx.ko \
+            /tmp/fwx-6.12.118-fwx.ko.sha256 \
+            --repo hubhike/amlogic-s9xxx-armbian --clobber
+          echo "Uploaded fwx.ko to kernel-fwx-6.12 release"
